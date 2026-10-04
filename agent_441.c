@@ -1,4 +1,3 @@
-#include <sys/sysinfo.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -6,47 +5,71 @@
 #include <pthread.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
+#include <arpa/inet.h>
+#include <sys/sysinfo.h>
+#include <time.h>
 
 #define PORT 9410
 #define MAX_CONNECTIONS 5
 
-// Structure to pass data safely to the new thread
+// Global mutex and log file for thread-safe writing[cite: 2, 4]
+pthread_mutex_t log_mutex = PTHREAD_MUTEX_INITIALIZER;
+const char *LOG_FILE = "remoteops_IT24102441.log";
+
 typedef struct {
     int socket;
+    char ip[INET_ADDRSTRLEN];
 } ClientData;
 
-// The worker thread function for each connected Controller
+// Thread-safe logging function
+void log_action(const char *ip, const char *action) {
+    pthread_mutex_lock(&log_mutex);
+    FILE *f = fopen(LOG_FILE, "a");
+    if (f) {
+        time_t now = time(NULL);
+        char *dt = ctime(&now);
+        dt[strcspn(dt, "\n")] = 0; // Strip newline from time
+        fprintf(f, "[%s] IP: %s - %s\n", dt, ip, action);
+        fclose(f);
+    }
+    pthread_mutex_unlock(&log_mutex);
+}
+
 void *client_handler(void *arg) {
     ClientData *client = (ClientData *)arg;
     int client_socket = client->socket;
+    char client_ip[INET_ADDRSTRLEN];
+    strcpy(client_ip, client->ip);
     free(client);
 
     char buffer[1024];
+    char log_msg[2048];
     
-    // 1. Mandatory Authentication Check
+    log_action(client_ip, "Connected");
+
     ssize_t bytes_read = recv(client_socket, buffer, sizeof(buffer) - 1, 0);
     if (bytes_read > 0) {
         buffer[bytes_read] = '\0';
         buffer[strcspn(buffer, "\r\n")] = 0;
 
         if (strcmp(buffer, "AUTH OPS-2441") == 0) {
+            log_action(client_ip, "Authentication Successful");
             char *success_msg = "OK AUTHENTICATED SID:1442\n";
             send(client_socket, success_msg, strlen(success_msg), 0);
             
-            // 2. The Main Command Processing Loop
             while ((bytes_read = recv(client_socket, buffer, sizeof(buffer) - 1, 0)) > 0) {
                 buffer[bytes_read] = '\0';
                 buffer[strcspn(buffer, "\r\n")] = 0;
                 
+                snprintf(log_msg, sizeof(log_msg), "Command Received: %s", buffer);
+                log_action(client_ip, log_msg);
+                
                 if (strcmp(buffer, "SYSINFO") == 0) {
                     struct sysinfo info;
                     sysinfo(&info);
-                    long uptime = info.uptime;
-                    long mem_used = (info.totalram - info.freeram) / (1024 * 1024);
-                    float cpu_load = info.loads[0] / 65536.0; 
-                    
                     char response[256];
-                    snprintf(response, sizeof(response), "OK SYSINFO %.2f %ld %ld SID:1442\n", cpu_load, mem_used, uptime);
+                    snprintf(response, sizeof(response), "OK SYSINFO %.2f %ld %ld SID:1442\n", 
+                             info.loads[0] / 65536.0, (info.totalram - info.freeram) / (1024 * 1024), info.uptime);
                     send(client_socket, response, strlen(response), 0);
                     
                 } else if (strcmp(buffer, "LISTPROC") == 0) {
@@ -55,7 +78,6 @@ void *client_handler(void *arg) {
                     if (fp) {
                         fgets(procs, sizeof(procs)-1, fp);
                         pclose(fp);
-                        
                         char response[1024];
                         snprintf(response, sizeof(response), "OK PROCS %s SID:1442\n", procs);
                         send(client_socket, response, strlen(response), 0);
@@ -65,7 +87,6 @@ void *client_handler(void *arg) {
                     char *cmd = buffer + 5; 
                     char *sys_cmd = NULL;
                     
-                    // Strict whitelist enforcement[cite: 2, 3]
                     if (strcmp(cmd, "DATE") == 0) sys_cmd = "date";
                     else if (strcmp(cmd, "UPTIME") == 0) sys_cmd = "uptime -p";
                     else if (strcmp(cmd, "DISKFREE") == 0) sys_cmd = "df -h / | tail -1 | awk '{print $4}'";
@@ -78,15 +99,13 @@ void *client_handler(void *arg) {
                             char output[512] = {0};
                             fgets(output, sizeof(output)-1, fp); 
                             pclose(fp);
-                            
                             output[strcspn(output, "\r\n")] = 0; 
-                            
                             char response[1024];
-                            snprintf(response, sizeof(response), "OK EXEC_RESULT %s SID:1442\n", output); //[cite: 3]
+                            snprintf(response, sizeof(response), "OK EXEC_RESULT %s SID:1442\n", output);
                             send(client_socket, response, strlen(response), 0);
                         }
                     } else {
-                        char *err_msg = "ERR 002 COMMAND NOT ALLOWED SID:1442\n"; //[cite: 3]
+                        char *err_msg = "ERR 002 COMMAND NOT ALLOWED SID:1442\n";
                         send(client_socket, err_msg, strlen(err_msg), 0);
                     }
                     
@@ -101,11 +120,13 @@ void *client_handler(void *arg) {
                 }
             }
         } else {
-            char *err_msg = "ERR 001 AUTH FAILED SID:1442\n"; //[cite: 3]
+            log_action(client_ip, "Authentication Failed");
+            char *err_msg = "ERR 001 AUTH FAILED SID:1442\n";
             send(client_socket, err_msg, strlen(err_msg), 0);
         }
     }
     
+    log_action(client_ip, "Disconnected");
     close(client_socket);
     pthread_exit(NULL);
 }
@@ -125,7 +146,7 @@ int main() {
 
     server_addr.sin_family = AF_INET;
     server_addr.sin_addr.s_addr = INADDR_ANY;
-    server_addr.sin_port = htons(PORT); // Port 9410[cite: 3, 4]
+    server_addr.sin_port = htons(PORT); 
 
     if (bind(server_socket, (struct sockaddr *)&server_addr, sizeof(server_addr)) < 0) {
         perror("Bind failed");
@@ -139,29 +160,24 @@ int main() {
 
     printf("Agent started. Listening on port %d...\n", PORT);
 
-    // 2. The Accept Loop
     while(1) {
         struct sockaddr_in client_addr;
         socklen_t client_len = sizeof(client_addr);
         
         int client_socket = accept(server_socket, (struct sockaddr *)&client_addr, &client_len);
-        if (client_socket < 0) {
-            perror("Accept failed");
-            continue;
-        }
+        if (client_socket < 0) continue;
 
-        // Dynamically allocate memory for the client struct to avoid race conditions
         ClientData *client = malloc(sizeof(ClientData));
         client->socket = client_socket;
+        
+        // Convert client IP address to string format
+        inet_ntop(AF_INET, &(client_addr.sin_addr), client->ip, INET_ADDRSTRLEN);
 
-        // Spawn a new thread to handle the connection
         pthread_t thread_id;
         if (pthread_create(&thread_id, NULL, client_handler, (void *)client) != 0) {
-            perror("Thread creation failed");
             free(client);
             close(client_socket);
         } else {
-            // Detach the thread so the OS reclaims its memory when it exits
             pthread_detach(thread_id);
         }
     }
