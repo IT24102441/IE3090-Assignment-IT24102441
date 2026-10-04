@@ -1,3 +1,4 @@
+#include <sys/stat.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -108,7 +109,54 @@ void *client_handler(void *arg) {
                         char *err_msg = "ERR 002 COMMAND NOT ALLOWED SID:1442\n";
                         send(client_socket, err_msg, strlen(err_msg), 0);
                     }
+                    } else if (strncmp(buffer, "PUT ", 4) == 0) {
+                    char filename[256];
+                    long file_size;
                     
+                    // Parse the PUT <filename> <size> command
+                    if (sscanf(buffer + 4, "%255s %ld", filename, &file_size) == 2) {
+                        char filepath[512];
+                        snprintf(filepath, sizeof(filepath), "./agentfiles/IT24102441/%s", filename);
+                        
+                        FILE *file = fopen(filepath, "wb"); // Open in binary write mode
+                        if (file) {
+                            long bytes_remaining = file_size;
+                            char file_buf[1024];
+                            size_t chunk_size;
+                            
+                            // The exact byte-counting loop
+                            while (bytes_remaining > 0) {
+                                chunk_size = (bytes_remaining <(long)sizeof(file_buf)) ? bytes_remaining : (long)sizeof(file_buf);
+                                ssize_t received = recv(client_socket, file_buf, chunk_size, 0);
+                                
+                                if (received <= 0) break; // Network error or client disconnected
+                                
+                                fwrite(file_buf, 1, received, file);
+                                bytes_remaining -= received;
+                            }
+                            fclose(file);
+                            
+                            if (bytes_remaining == 0) {
+                                char response[512];
+                                snprintf(response, sizeof(response), "OK PUT %s SID:1442\n", filename);
+                                send(client_socket, response, strlen(response), 0);
+                                
+                                // Log the successful upload
+                                char log_up[512];
+                                snprintf(log_up, sizeof(log_up), "File Uploaded: %s (%ld bytes)", filename, file_size);
+                                log_action(client_ip, log_up);
+                            } else {
+                                char *err = "ERR 003 UPLOAD INCOMPLETE SID:1442\n";
+                                send(client_socket, err, strlen(err), 0);
+                            }
+                        } else {
+                            char *err = "ERR 004 FILE CREATION FAILED SID:1442\n";
+                            send(client_socket, err, strlen(err), 0);
+                        }
+                    } else {
+                        char *err = "ERR 005 INVALID PUT FORMAT SID:1442\n";
+                        send(client_socket, err, strlen(err), 0);
+                    }
                 } else if (strcmp(buffer, "QUIT") == 0) {
                     char *bye_msg = "OK BYE SID:1442\n";
                     send(client_socket, bye_msg, strlen(bye_msg), 0);
@@ -159,6 +207,15 @@ int main() {
     }
 
     printf("Agent started. Listening on port %d...\n", PORT);
+
+    // Auto-create required directories
+    struct stat st = {0};
+    if (stat("./agentfiles", &st) == -1) {
+        mkdir("./agentfiles", 0700);
+    }
+    if (stat("./agentfiles/IT24102441", &st) == -1) {
+        mkdir("./agentfiles/IT24102441", 0700);
+    }
 
     while(1) {
         struct sockaddr_in client_addr;
