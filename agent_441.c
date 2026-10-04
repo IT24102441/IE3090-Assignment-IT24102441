@@ -19,7 +19,7 @@ typedef struct {
 void *client_handler(void *arg) {
     ClientData *client = (ClientData *)arg;
     int client_socket = client->socket;
-    free(client); // Free the memory allocated in main to prevent leaks
+    free(client);
 
     char buffer[1024];
     
@@ -27,24 +27,85 @@ void *client_handler(void *arg) {
     ssize_t bytes_read = recv(client_socket, buffer, sizeof(buffer) - 1, 0);
     if (bytes_read > 0) {
         buffer[bytes_read] = '\0';
-        
-        // Strip trailing newline characters for clean string comparison
         buffer[strcspn(buffer, "\r\n")] = 0;
 
-        // Check against your personalized token[cite: 2, 4]
         if (strcmp(buffer, "AUTH OPS-2441") == 0) {
-            char *success_msg = "OK AUTHENTICATED SID:1442\n"; // Personalized SID
+            char *success_msg = "OK AUTHENTICATED SID:1442\n";
             send(client_socket, success_msg, strlen(success_msg), 0);
             
-            // TODO: The main command processing loop (SYSINFO, EXEC, PUT, GET) will go here
-            
+            // 2. The Main Command Processing Loop
+            while ((bytes_read = recv(client_socket, buffer, sizeof(buffer) - 1, 0)) > 0) {
+                buffer[bytes_read] = '\0';
+                buffer[strcspn(buffer, "\r\n")] = 0;
+                
+                if (strcmp(buffer, "SYSINFO") == 0) {
+                    struct sysinfo info;
+                    sysinfo(&info);
+                    long uptime = info.uptime;
+                    long mem_used = (info.totalram - info.freeram) / (1024 * 1024);
+                    float cpu_load = info.loads[0] / 65536.0; 
+                    
+                    char response[256];
+                    snprintf(response, sizeof(response), "OK SYSINFO %.2f %ld %ld SID:1442\n", cpu_load, mem_used, uptime);
+                    send(client_socket, response, strlen(response), 0);
+                    
+                } else if (strcmp(buffer, "LISTPROC") == 0) {
+                    FILE *fp = popen("ps -eo comm --no-headers | head -n 5 | tr '\\n' ','", "r");
+                    char procs[512] = {0};
+                    if (fp) {
+                        fgets(procs, sizeof(procs)-1, fp);
+                        pclose(fp);
+                        
+                        char response[1024];
+                        snprintf(response, sizeof(response), "OK PROCS %s SID:1442\n", procs);
+                        send(client_socket, response, strlen(response), 0);
+                    }
+                    
+                } else if (strncmp(buffer, "EXEC ", 5) == 0) {
+                    char *cmd = buffer + 5; 
+                    char *sys_cmd = NULL;
+                    
+                    // Strict whitelist enforcement[cite: 2, 3]
+                    if (strcmp(cmd, "DATE") == 0) sys_cmd = "date";
+                    else if (strcmp(cmd, "UPTIME") == 0) sys_cmd = "uptime -p";
+                    else if (strcmp(cmd, "DISKFREE") == 0) sys_cmd = "df -h / | tail -1 | awk '{print $4}'";
+                    else if (strcmp(cmd, "HOSTNAME") == 0) sys_cmd = "hostname";
+                    else if (strcmp(cmd, "WHOAMI") == 0) sys_cmd = "whoami";
+                    
+                    if (sys_cmd != NULL) {
+                        FILE *fp = popen(sys_cmd, "r");
+                        if (fp) {
+                            char output[512] = {0};
+                            fgets(output, sizeof(output)-1, fp); 
+                            pclose(fp);
+                            
+                            output[strcspn(output, "\r\n")] = 0; 
+                            
+                            char response[1024];
+                            snprintf(response, sizeof(response), "OK EXEC_RESULT %s SID:1442\n", output); //[cite: 3]
+                            send(client_socket, response, strlen(response), 0);
+                        }
+                    } else {
+                        char *err_msg = "ERR 002 COMMAND NOT ALLOWED SID:1442\n"; //[cite: 3]
+                        send(client_socket, err_msg, strlen(err_msg), 0);
+                    }
+                    
+                } else if (strcmp(buffer, "QUIT") == 0) {
+                    char *bye_msg = "OK BYE SID:1442\n";
+                    send(client_socket, bye_msg, strlen(bye_msg), 0);
+                    break; 
+                    
+                } else {
+                    char *err_msg = "ERR 002 COMMAND NOT ALLOWED SID:1442\n";
+                    send(client_socket, err_msg, strlen(err_msg), 0);
+                }
+            }
         } else {
-            char *err_msg = "ERR 001 AUTH FAILED SID:1442\n";
+            char *err_msg = "ERR 001 AUTH FAILED SID:1442\n"; //[cite: 3]
             send(client_socket, err_msg, strlen(err_msg), 0);
         }
     }
     
-    // Close the connection cleanly if authentication fails or client disconnects
     close(client_socket);
     pthread_exit(NULL);
 }
