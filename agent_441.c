@@ -35,12 +35,47 @@ void log_action(const char *ip, const char *action) {
     }
     pthread_mutex_unlock(&log_mutex);
 }
+// Struct for the UDP monitor thread
+typedef struct {
+    char ip[INET_ADDRSTRLEN];
+    int active;
+} MonitorData;
 
+// UDP Streaming Thread
+void *monitor_thread(void *arg) {
+    MonitorData *md = (MonitorData *)arg;
+    int udp_socket = socket(AF_INET, SOCK_DGRAM, 0);
+    
+    struct sockaddr_in dest_addr;
+    memset(&dest_addr, 0, sizeof(dest_addr));
+    dest_addr.sin_family = AF_INET;
+    dest_addr.sin_port = htons(9411); 
+    inet_pton(AF_INET, md->ip, &dest_addr.sin_addr);
+    dest_addr.sin_family = AF_INET;
+    dest_addr.sin_port = htons(9411); // Controller's UDP listening port
+    inet_pton(AF_INET, md->ip, &dest_addr.sin_addr);
+
+    while(md->active) {
+        struct sysinfo info;
+        sysinfo(&info);
+        char payload[256];
+        snprintf(payload, sizeof(payload), "MONITOR_UPDATE CPU:%.2f MEM:%ldMB\n", 
+                 info.loads[0] / 65536.0, (info.totalram - info.freeram) / (1024 * 1024));
+        
+        sendto(udp_socket, payload, strlen(payload), 0, (struct sockaddr *)&dest_addr, sizeof(dest_addr));
+        sleep(5); // Wait 5 seconds between streams
+    }
+    
+    close(udp_socket);
+    free(md); // Clean up memory when stopped
+    pthread_exit(NULL);
+}
 void *client_handler(void *arg) {
     ClientData *client = (ClientData *)arg;
     int client_socket = client->socket;
     char client_ip[INET_ADDRSTRLEN];
     strcpy(client_ip, client->ip);
+    MonitorData *mon_data = NULL;
     free(client);
 
     char buffer[1024];
@@ -192,6 +227,36 @@ void *client_handler(void *arg) {
                         char *err = "ERR 007 INVALID GET FORMAT SID:1442\n";
                         send(client_socket, err, strlen(err), 0);
                     }
+                   } else if (strcmp(buffer, "MONITOR START") == 0) {
+                    if (mon_data == NULL) {
+                        mon_data = malloc(sizeof(MonitorData));
+                        strcpy(mon_data->ip, client_ip);
+                        mon_data->active = 1;
+                        
+                        pthread_t mon_tid;
+                        pthread_create(&mon_tid, NULL, monitor_thread, mon_data);
+                        pthread_detach(mon_tid); // Run independently 
+                        
+                        char *resp = "OK MONITOR STARTED SID:1442\n";
+                        send(client_socket, resp, strlen(resp), 0);
+                        log_action(client_ip, "MONITOR START initiated");
+                    } else {
+                        char *err = "ERR 008 MONITOR ALREADY RUNNING SID:1442\n";
+                        send(client_socket, err, strlen(err), 0);
+                    }
+                    
+                } else if (strcmp(buffer, "MONITOR STOP") == 0) {
+                    if (mon_data != NULL) {
+                        mon_data->active = 0; // Signals the while-loop to terminate
+                        mon_data = NULL;
+                        
+                        char *resp = "OK MONITOR STOPPED SID:1442\n";
+                        send(client_socket, resp, strlen(resp), 0);
+                        log_action(client_ip, "MONITOR STOP initiated");
+                    } else {
+                        char *err = "ERR 009 MONITOR NOT RUNNING SID:1442\n";
+                        send(client_socket, err, strlen(err), 0);
+                    }
                 } else if (strcmp(buffer, "QUIT") == 0) {
                     char *bye_msg = "OK BYE SID:1442\n";
                     send(client_socket, bye_msg, strlen(bye_msg), 0);
@@ -208,7 +273,10 @@ void *client_handler(void *arg) {
             send(client_socket, err_msg, strlen(err_msg), 0);
         }
     }
-    
+    // Safely stop the UDP thread if client drops connection
+    if (mon_data != NULL) {
+        mon_data->active = 0;
+    }
     log_action(client_ip, "Disconnected");
     close(client_socket);
     pthread_exit(NULL);
