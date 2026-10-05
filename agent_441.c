@@ -106,7 +106,13 @@ void *client_handler(void *arg) {
                     char response[256];
                     snprintf(response, sizeof(response), "OK SYSINFO %.2f %ld %ld SID:1442\n", 
                              info.loads[0] / 65536.0, (info.totalram - info.freeram) / (1024 * 1024), info.uptime);
-                    send(client_socket, response, strlen(response), 0);
+                            // Optional Feature: Persist SYSINFO snapshot
+                            FILE *hist_file = fopen("./agentfiles/IT24102441/history.txt", "a");
+                            if (hist_file) {
+                                fprintf(hist_file, "[SYSINFO] %s", response);
+                                fclose(hist_file);
+                            }
+			    send(client_socket, response, strlen(response), 0);
                     
                 } else if (strcmp(buffer, "LISTPROC") == 0) {
                     FILE *fp = popen("ps -eo comm --no-headers | head -n 5 | tr '\\n' ','", "r");
@@ -116,7 +122,12 @@ void *client_handler(void *arg) {
                         pclose(fp);
                         char response[1024];
                         snprintf(response, sizeof(response), "OK PROCS %s SID:1442\n", procs);
-                        send(client_socket, response, strlen(response), 0);
+                        FILE *hist_file = fopen("./agentfiles/IT24102441/history.txt", "a");
+           		 if (hist_file) {
+                		fprintf(hist_file, "[LISTPROC] %s", response);
+                		fclose(hist_file);
+           		 }
+		        send(client_socket, response, strlen(response), 0);
                     }
                     
                 } else if (strncmp(buffer, "EXEC ", 5) == 0) {
