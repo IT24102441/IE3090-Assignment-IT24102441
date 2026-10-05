@@ -157,6 +157,41 @@ void *client_handler(void *arg) {
                         char *err = "ERR 005 INVALID PUT FORMAT SID:1442\n";
                         send(client_socket, err, strlen(err), 0);
                     }
+} else if (strncmp(buffer, "GET ", 4) == 0) {
+                    char filename[256];
+                    
+                    if (sscanf(buffer + 4, "%255s", filename) == 1) {
+                        char filepath[512];
+                        snprintf(filepath, sizeof(filepath), "./agentfiles/IT24102441/%s", filename);
+                        
+                        FILE *file = fopen(filepath, "rb"); 
+                        if (file) {
+                            fseek(file, 0, SEEK_END);
+                            long file_size = ftell(file);
+                            fseek(file, 0, SEEK_SET);
+                            
+                            char response[256];
+                            snprintf(response, sizeof(response), "OK GET %ld SID:1442\n", file_size);
+                            send(client_socket, response, strlen(response), 0);
+                            
+                            char file_buf[1024];
+                            size_t bytes_read_file;
+                            while ((bytes_read_file = fread(file_buf, 1, sizeof(file_buf), file)) > 0) {
+                                send(client_socket, file_buf, bytes_read_file, 0);
+                            }
+                            fclose(file);
+                            
+                            char log_down[512];
+                            snprintf(log_down, sizeof(log_down), "File Downloaded: %s (%ld bytes)", filename, file_size);
+                            log_action(client_ip, log_down);
+                        } else {
+                            char *err = "ERR 006 FILE NOT FOUND SID:1442\n";
+                            send(client_socket, err, strlen(err), 0);
+                        }
+                    } else {
+                        char *err = "ERR 007 INVALID GET FORMAT SID:1442\n";
+                        send(client_socket, err, strlen(err), 0);
+                    }
                 } else if (strcmp(buffer, "QUIT") == 0) {
                     char *bye_msg = "OK BYE SID:1442\n";
                     send(client_socket, bye_msg, strlen(bye_msg), 0);
